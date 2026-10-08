@@ -1,0 +1,9 @@
+[package]
+name = "qwen-os-kernel"
+version = "0.1.0"
+edition = "2021"
+description = "QwenOS — экспериментальная ОС: UEFI-загрузчик + гибридное ядро (x86_64, Rust)"
+
+[dependencies]
+uefi = { version = "0.35", features = ["alloc", "logger", "global_allocator", "panic_handler"] }
+log = "0.4"
