@@ -184,7 +184,12 @@ unsafe fn apply_packet() {
     }
 }
 
-/// Текущее состояние мыши (снимок).
+/// Текущее состояние мыши (без опроса железа — пакеты забирает poll()/IRQ).
+pub fn snapshot() -> MouseState {
+    unsafe { STATE }
+}
+
+/// Опросить контроллер и вернуть актуальное состояние (polling-режим).
 pub fn state() -> MouseState {
     poll();
     unsafe { STATE }
@@ -200,9 +205,37 @@ pub fn left_click_edge() -> bool {
 }
 
 fn screen_width() -> u32 {
-    crate::gfx::framebuffer().width
+    crate::gfx::fb::fb_width() as u32
 }
 
 fn screen_height() -> u32 {
-    crate::gfx::framebuffer().height
+    crate::gfx::fb::fb_height() as u32
+}
+
+static mut PREV_RIGHT: bool = false;
+
+/// Правый клик: край (переход в нажатое состояние) с прошлого вызова.
+pub fn right_click_edge() -> bool {
+    unsafe {
+        let now = STATE.right;
+        let edge = now && !PREV_RIGHT;
+        PREV_RIGHT = now;
+        edge
+    }
+}
+
+/// Опросить пакеты из контроллера и вернуть актуальное состояние мыши.
+pub fn poll_state() -> MouseState {
+    poll();
+    unsafe { STATE }
+}
+
+/// Вызывается из обработчика прерывания IRQ12: читает байты пакета.
+pub fn irq_handler() {
+    while inb(STATUS_PORT) & OUT_BUF_FULL != 0 {
+        let b = inb(DATA_PORT);
+        unsafe {
+            push_byte(b);
+        }
+    }
 }

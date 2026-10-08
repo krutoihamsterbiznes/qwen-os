@@ -3,13 +3,13 @@
 
 use crate::arch;
 use crate::arch::isr;
-use crate::drivers::mouse::{self, MouseState};
+use crate::drivers::mouse::{self, right_click_edge, MouseState};
 use crate::drivers::ps2;
 use crate::drivers::vfs;
 use crate::gfx::fb::{self, blend_rect, circle, fill_rect, line, put_pixel, rect, Color};
 use crate::gfx::font;
 use crate::gui::term;
-use crate::gui::window::{self, App, Hit};
+use crate::gui::window::{self, App, Hit, TITLE_H};
 
 pub const TASKBAR_H: usize = 30;
 
@@ -144,9 +144,8 @@ fn draw_taskbar() {
         let mut buf = FmtBuf(&mut sb, 0);
         let _ = write!(buf, "{:02}:{:02}:{:02}", hh, mm, ss);
     }
-    let len = unsafe { *(core::ptr::addr_of!(sb).cast::<u8>()) } ; // not used
-    let _ = len;
-    let time_str = core::str::from_utf8(&sb[..8]).unwrap_or("00:00:00");
+    let tl = sb.iter().position(|&c| c == 0).unwrap_or(8);
+    let time_str = core::str::from_utf8(&sb[..tl]).unwrap_or("00:00:00");
     font::draw_text(w - 90, ty + 9, time_str, 2, Color::WHITE);
 }
 
@@ -174,10 +173,10 @@ fn draw_window_content(idx: usize) {
     }
 }
 
-fn render_info(cx: usize, cy: usize, cw: usize, _ch: usize) {
-    fill_rect(cx, cy, cw, _ch, Color::WINDOW_BG);
+fn render_info(cx: usize, cy: usize, cw: usize, ch: usize) {
+    fill_rect(cx, cy, cw, ch, Color::WINDOW_BG);
     let mut y = cy + 8;
-    for line in crate::SYS_INFO_LINES {
+    for line in unsafe { crate::SYS_INFO_LINES.iter() } {
         font::draw_text(cx + 8, y, line, 1, Color::TEXT);
         y += 14;
     }
@@ -253,7 +252,7 @@ pub fn redraw() {
         draw_window_content(idx);
     }
     draw_taskbar();
-    let ms = mouse::state();
+    let ms = mouse::snapshot();
     draw_cursor(ms);
 }
 
@@ -335,79 +334,6 @@ fn taskbar_window_btn(x: usize, y: usize) -> Option<usize> {
     None
 }
 
-/// Обработать движение/клики мыши.
-fn handle_mouse() {
-    let ms = mouse::poll_state();
-    let x = ms.x.max(0) as usize;
-    let y = ms.y.max(0) as usize;
-
-    // перетаскивание окна
-    unsafe {
-        if DRAG_IDX != usize::MAX {
-            if ms.left {
-                let nx = (ms.x - DRAG_DX).max(0) as usize;
-                let ny = (ms.y - DRAG_DY).max(0) as usize;
-                window::move_to(DRAG_IDX, nx, ny.min(screen_h().saturating_sub(window::TITLE_H + 40)));
-            } else {
-                DRAG_IDX = usize::MAX;
-            }
-            return;
-        }
-    }
-
-    let pressed_edge = ms.left && !unsafe { PREV_LEFT };
-    unsafe { PREV_LEFT = ms.left }
-    let right_edge = mouse::right_click_edge();
-
-    if pressed_edge {
-        // клик: сначала проверим панель задач и ярлыки (они под окнами по z, но
-        // кликаются только если не попали в окно)
-        if let Some((idx, hit)) = window::window_at(x, y) {
-            window::focus(idx);
-            match hit {
-                Hit::CloseBtn => window::close(idx),
-                Hit::MinBtn => {
-                    // minimize = увести за левый край (упрощённо: закрыть нельзя — прячем)
-                    window::minimize(idx);
-                }
-                Hit::Titlebar => {
-                    if let Some(win) = window::get(idx) {
-                        unsafe {
-                            DRAG_IDX = idx;
-                            DRAG_DX = ms.x - win.x as i32;
-                            DRAG_DY = ms.y - win.y as i32;
-                        }
-                    }
-                }
-                Hit::Client => {
-                    // двойной клик по клиенту терминала ничего не делает; focus уже выполнен
-                }
-            }
-        } else if taskbar_start_btn(x, y) {
-            // «Пуск»: открыть самое верхнее приложение или терминал
-            launch_icon(App::Terminal);
-        } else if let Some(idx) = taskbar_window_btn(x, y) {
-            window::restore_focus(idx);
-        } else if let Some(app) = icon_at(x, y) {
-            launch_icon(app);
-        }
-    }
-
-    if right_edge {
-        // правый клик по рабочему столу — контекстное меню (упрощённо: beep + info)
-        if window::window_at(x, y).is_none() {
-            arch::beep(660, 40);
-            if context_menu_open() {
-                close_context_menu();
-            } else {
-                open_context_menu(x, y);
-            }
-        } else {
-            close_context_menu();
-        }
-    }
-}
-
 // Контекстное меню рабочего стола: маленькое всплывающее окно-список.
 static mut CTX_OPEN: bool = false;
 static mut CTX_X: usize = 0;
@@ -449,8 +375,11 @@ fn ctx_item_at(x: usize, y: usize) -> Option<usize> {
 }
 
 /// Обработать клавишу из буфера клавиатуры (доставляет в активный терминал).
-fn handle_keys() {
+/// Возвращает true, если был хотя бы один символ (нужен redraw).
+fn handle_keys() -> bool {
+    let mut any = false;
     while let Some(k) = ps2::poll_key() {
+        any = true;
         match k {
             '\r' | '\n' => {
                 term::submit(&mut |name| open_named(name));
@@ -462,34 +391,43 @@ fn handle_keys() {
             _ => {}
         }
     }
+    any
 }
 
 /// Главный цикл GUI. Вызывается из stage2 после инициализации всего остального.
 pub fn run() -> ! {
     spawn_default_windows();
-    arch::pic_remap_enable_timer_kbd_mouse();
-    arch::pit_start(100);
+    arch::pic_enable_mouse_irq();
     arch::enable_interrupts();
 
+    let mut last_ticks: u64 = 0;
     loop {
-        handle_keys();
-        handle_mouse_with_ctx();
-        redraw();
-        draw_context_menu();
-        // ~30 FPS при 100 Гц таймере: ждём 3 тика
-        let t0 = unsafe { isr::TICKS };
-        while unsafe { isr::TICKS } < t0 + 3 {
+        let dirty_keys = handle_keys();
+        let dirty_mouse = handle_mouse_with_ctx();
+        let t = unsafe { isr::TICKS };
+        // часы на панели задач обновляем раз в секунду; остальное — по событиям
+        let dirty_clock = t / 100 != last_ticks / 100;
+        if dirty_keys || dirty_mouse || dirty_clock {
+            last_ticks = t;
+            redraw();
+            draw_context_menu();
+        }
+        // спим до следующего тика PIT (событийно-ориентированный цикл)
+        while unsafe { isr::TICKS } <= t {
             arch::halt();
         }
     }
 }
 
-fn handle_mouse_with_ctx() {
-    // сначала special: клик по пунктам контекстного меню
+/// Мышиные события + контекстное меню. Один опрос железа за итерацию цикла.
+/// Возвращает true, если нужно перерисовать экран (меню открылось/закрылось).
+fn handle_mouse_with_ctx() -> bool {
     let ms = mouse::poll_state();
     let x = ms.x.max(0) as usize;
     let y = ms.y.max(0) as usize;
     let pressed_edge = ms.left && !unsafe { PREV_LEFT };
+    unsafe { PREV_LEFT = ms.left }
+
     if pressed_edge {
         if let Some(item) = ctx_item_at(x, y) {
             close_context_menu();
@@ -499,11 +437,72 @@ fn handle_mouse_with_ctx() {
                 2 => paint_demo(),
                 _ => launch_icon(App::Logo),
             }
-            unsafe { PREV_LEFT = ms.left }
-            return;
+            return true;
+        } else if context_menu_open() {
+            close_context_menu();
+            // fallthrough: клик мимо меню может открыть окно под ним
+        }
+    }
+    handle_mouse_pre(ms, pressed_edge)
+}
+
+/// Обработать движение/клики мыши (состояние уже опрошено вызывающим кодом).
+fn handle_mouse_pre(ms: MouseState, pressed_edge: bool) -> bool {
+    let x = ms.x.max(0) as usize;
+    let y = ms.y.max(0) as usize;
+
+    // перетаскивание окна
+    unsafe {
+        if DRAG_IDX != usize::MAX {
+            if ms.left {
+                let nx = (ms.x - DRAG_DX).max(0) as usize;
+                let ny = (ms.y - DRAG_DY).max(0) as usize;
+                window::move_to(DRAG_IDX, nx, ny.min(screen_h().saturating_sub(TITLE_H + 40)));
+            } else {
+                DRAG_IDX = usize::MAX;
+            }
+            return true;
+        }
+    }
+
+    if pressed_edge {
+        if let Some((idx, hit)) = window::window_at(x, y) {
+            window::focus(idx);
+            match hit {
+                Hit::CloseBtn => window::close(idx),
+                Hit::MinBtn => window::minimize(idx),
+                Hit::Titlebar => {
+                    if let Some(win) = window::get(idx) {
+                        unsafe {
+                            DRAG_IDX = idx;
+                            DRAG_DX = ms.x - win.x as i32;
+                            DRAG_DY = ms.y - win.y as i32;
+                        }
+                    }
+                }
+                Hit::Client => {}
+            }
+        } else if taskbar_start_btn(x, y) {
+            launch_icon(App::Terminal);
+        } else if let Some(idx) = taskbar_window_btn(x, y) {
+            window::restore_focus(idx);
+        } else if let Some(app) = icon_at(x, y) {
+            launch_icon(app);
+        }
+    }
+
+    if right_click_edge() {
+        if window::window_at(x, y).is_none() {
+            arch::beep(660, 40);
+            if context_menu_open() {
+                close_context_menu();
+            } else {
+                open_context_menu(x, y);
+            }
         } else if context_menu_open() {
             close_context_menu();
         }
+        return true;
     }
-    handle_mouse();
+    false
 }

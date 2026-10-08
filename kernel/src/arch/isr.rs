@@ -171,6 +171,11 @@ extern "C" fn isr_rust_handler(frame: &Frame) {
             crate::drivers::ps2::irq_handler();
             arch::pic_eoi(v);
         }
+        // IRQ12 → мышь PS/2 (aux)
+        v if v == arch::IRQ_BASE + 12 => {
+            crate::drivers::mouse::irq_handler();
+            arch::pic_eoi(v);
+        }
         // Исключения ЦП
         0..=31 => exception_panic(vector, frame),
         // Прочие IRQ — просто заглушаем EOI'ем

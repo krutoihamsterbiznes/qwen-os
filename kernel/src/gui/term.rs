@@ -1,6 +1,7 @@
 //! Графический терминал внутри окна: вывод текста, ввод команд с клавиатуры.
 
 use core::fmt::Write as _;
+use core::fmt::Write;
 
 use crate::drivers::vfs;
 use crate::gfx::fb::{fill_rect, Color};
@@ -214,10 +215,13 @@ fn execute(cmd: &str, on_open_app: &mut dyn FnMut(&str)) {
         "echo" => print_line(rest),
         "ver" => print_line("QwenOS 0.2.0-dev (UEFI hybrid kernel, x86_64, Rust)"),
         "info" => {
-            print_line(crate::SYS_INFO_LINE1);
-            print_line(crate::SYS_INFO_LINE2);
-            print_line(crate::SYS_INFO_LINE3);
+            unsafe {
+                for line in crate::SYS_INFO_LINES.iter() {
+                    print_line(line);
+                }
+            }
         }
+        "true" => {}
         "date" | "uptime" => {
             let ticks = unsafe { crate::arch::isr::TICKS };
             let secs = ticks / 100;

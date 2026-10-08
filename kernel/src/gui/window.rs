@@ -236,3 +236,40 @@ impl Iterator for ZIter {
 pub fn count() -> usize {
     z_order().count()
 }
+
+/// Самое верхнее (активное) окно или usize::MAX.
+pub fn topmost() -> usize {
+    unsafe {
+        if STACK_LEN == 0 {
+            usize::MAX
+        } else {
+            TOP_STACK[STACK_LEN - 1]
+        }
+    }
+}
+
+/// Обход z-стека сверху вниз (для кнопок панели задач).
+pub fn z_order_rev() -> core::iter::Rev<ZIter> {
+    z_order().rev()
+}
+
+/// «Свёрнутое» окно прячется за правым краем экрана (за пределами hit-test).
+const OFFSCREEN_X: usize = usize::MAX / 4;
+
+/// Свернуть окно: увести за правый край экрана (упрощённая минимизация).
+pub fn minimize(idx: usize) {
+    move_to(idx, OFFSCREEN_X, 50);
+}
+
+/// Вернуть фокус окну из панели задач (раскрытие «минимизированного»).
+pub fn restore_focus(idx: usize) {
+    unsafe {
+        if let Some(w) = WINS.get_mut(idx) {
+            if w.used && w.x >= OFFSCREEN_X {
+                w.x = 80 + (idx * 24) % 200;
+                w.y = 60 + (idx * 24) % 120;
+            }
+        }
+    }
+    focus(idx);
+}

@@ -290,3 +290,37 @@ pub fn init() {
     pic_mask_all();
     disable_interrupts();
 }
+
+/// Разрешить IRQ12 (aux/PS/2 мышь) в PIC после его инициализации драйвером.
+pub fn pic_enable_mouse_irq() {
+    unsafe {
+        let mask = inb(PIC2_DATA);
+        outb(PIC2_DATA, mask & !(1 << 4)); // IRQ12 = бит 4 второго каскада
+    }
+}
+
+/// Выключить машину через QEMU/Bochs ACPI PM-regистр (порт 0x604, данные 0x2000).
+pub fn acpi_shutdown() -> ! {
+    unsafe {
+        disable_interrupts();
+        outb(0xb004, 0x20); // BCLK_STS — «magic» для некоторых эмуляторов
+        outb(0x604, 0x20); // ACPI PM_CNT: S5
+    }
+    loop {
+        halt();
+    }
+}
+
+/// Перезагрузка: классический трюк через порт 0x92 (A20 gate) + long jump 0xFFFFFFF0.
+pub fn reset() -> ! {
+    unsafe {
+        disable_interrupts();
+        let b = inb(0x92);
+        outb(0x92, b | 1);
+        core::arch::asm!(
+            "mov eax, 0xfffffff0",
+            "jmp eax",
+            options(noreturn, nomem)
+        );
+    }
+}
